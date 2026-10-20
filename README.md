@@ -56,6 +56,33 @@ async fn enable() -> Result<(), Infallible> {
 }
 ```
 
+### Connecting and authenticating a driver
+
+Implement `DriverConnector` in the protocol/provider integration crate. The
+connector defines its own target, authentication, driver, and connection error
+types, and consumes the authentication value while constructing an
+authenticated driver. It does not retrieve credentials.
+
+An external integration can use its existing `CredentialProvider` (for
+example, `oss-providers::CredentialProvider`) to resolve a
+`CredentialMaterial`, convert that material to the selected connector's
+`Authentication` type, and then call `connect`:
+
+```rust,ignore
+let credential = credential_provider.credential(query).await?;
+let authentication = ProviderAuthentication::try_from(credential.material)?;
+let driver = connector.connect(&target, authentication).await?;
+
+operation(provider_operation).run(&driver).await?;
+```
+
+This keeps secret retrieval, leases, and renewal in the external credential
+integration while keeping protocol-specific authentication in the provider.
+`network-device` itself has no dependency on `oss-providers`, Vault, or any
+credential backend. The associated types and returned driver use static
+dispatch; the connector contract adds no `Box`, trait object, or shared-state
+wrapper.
+
 Sequential composition is static and has no boxing or dynamic dispatch:
 
 ```rust,ignore

@@ -86,12 +86,24 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Driver connection and credentials
+//!
+//! [`DriverConnector`] constructs and authenticates a concrete provider driver
+//! from a provider-defined target and authentication value. Credential lookup
+//! remains the responsibility of the integrating application. For example, an
+//! integration can resolve an `oss_providers::CredentialMaterial` using its
+//! `CredentialProvider`, convert that value into the selected connector's
+//! `Authentication` type, and pass it to [`DriverConnector::connect`]. This
+//! crate has no dependency on `oss-providers`, Vault, or a credential store.
 
+mod connector;
 mod iac;
 mod interface;
 mod operation;
 mod routing;
 
+pub use connector::DriverConnector;
 pub use iac::{IacBackend, InterfaceConfiguration, StaticRouteConfiguration};
 pub use interface::{
     InterfaceName, InterfaceNameError, IpPrefix, IpPrefixError, IpPrefixParseError,
