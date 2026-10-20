@@ -1,0 +1,21 @@
+[package]
+name = "network-device"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A strongly typed eDSL and IaC contracts for network device configuration"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/kamyar1979/network-device-rust"
+documentation = "https://docs.rs/network-device"
+keywords = ["network", "automation", "iac", "edsl"]
+categories = ["network-programming", "config"]
+publish = ["crates-io"]
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
