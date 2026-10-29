@@ -1,8 +1,8 @@
 //! Typed imperative operations and their embedded DSL composition.
 
 use crate::{
-    BandwidthLimits, BandwidthPolicy, DeviceError, InterfaceName, PolicyName, PolicyScope,
-    StaticRoute,
+    AccessList, AccessListName, BandwidthLimits, BandwidthPolicy, DeviceError, InterfaceName,
+    PolicyName, PolicyScope, StaticRoute,
 };
 use std::future::Future;
 
@@ -230,9 +230,8 @@ impl RemoveBandwidthPolicy {
 }
 
 /// Converging operation: the predefined policy applies to the interface's
-/// traffic in the given scope. The policy must already be defined; a driver
-/// adds only what the scope needs (for a host, its classifier entry), never a
-/// policy object of its own.
+/// traffic in the given scope. The policy, and for an access-list scope the
+/// access list, must already exist; a driver adds only what the scope needs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttachBandwidthPolicy {
     /// Predefined policy to attach.
@@ -305,6 +304,50 @@ impl RemoveInterfaceBandwidthLimit {
     /// Creates the operation for one interface.
     pub const fn new(interface: InterfaceName) -> Self {
         Self { interface }
+    }
+}
+
+/// Converging operation: the access list exists with exactly these entries,
+/// in this order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnsureAccessList {
+    /// Desired list.
+    pub list: AccessList,
+}
+
+impl EnsureAccessList {
+    /// Creates the operation for one list.
+    pub const fn new(list: AccessList) -> Self {
+        Self { list }
+    }
+}
+
+/// Converging operation: the access list is absent. Removing a missing list
+/// succeeds; a driver refuses while a policy is attached to its traffic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveAccessList {
+    /// List to remove.
+    pub name: AccessListName,
+}
+
+impl RemoveAccessList {
+    /// Creates the operation for one list.
+    pub const fn new(name: AccessListName) -> Self {
+        Self { name }
+    }
+}
+
+/// Read: an access list as the device holds it, or `None` when absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetAccessList {
+    /// List to read.
+    pub name: AccessListName,
+}
+
+impl GetAccessList {
+    /// Creates the read for one list.
+    pub const fn new(name: AccessListName) -> Self {
+        Self { name }
     }
 }
 

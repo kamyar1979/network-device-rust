@@ -4,8 +4,8 @@
 //! realizes it (policy maps, classifiers, per-direction objects, device names)
 //! is the driver's concern.
 
+use crate::AccessListName;
 use std::fmt;
-use std::net::IpAddr;
 use std::num::NonZeroU64;
 use std::str::FromStr;
 
@@ -142,8 +142,8 @@ impl BandwidthLimit {
 
 /// Limits for ingress and/or egress traffic; at least one direction is limited.
 ///
-/// Ingress is traffic entering the device on the interface (a customer's
-/// upload); egress is traffic leaving it (a customer's download).
+/// Ingress is traffic received on the interface; egress is traffic sent out
+/// of it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BandwidthLimits {
     ingress: Option<BandwidthLimit>,
@@ -205,12 +205,12 @@ impl BandwidthPolicy {
 }
 
 /// The traffic an attached policy applies to.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PolicyScope {
     /// All traffic of the interface.
     Interface,
-    /// Only the traffic of one host address on the interface.
-    Host(IpAddr),
+    /// Only the interface's traffic matching the named access list.
+    AccessList(AccessListName),
 }
 
 /// A predefined policy attached to an interface with a scope.
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn policy_names_are_ascii_words_of_bounded_length() {
-        assert!(PolicyName::new("quota-exceeded_bandwidth").is_ok());
+        assert!(PolicyName::new("rate-limit_10m").is_ok());
         assert_eq!(PolicyName::new(""), Err(PolicyNameError::Length));
         assert_eq!(
             PolicyName::new("x".repeat(MAX_POLICY_NAME_LENGTH + 1)),

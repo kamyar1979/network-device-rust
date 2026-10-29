@@ -9,12 +9,13 @@
 //! or turned into a file by this recorder.
 
 use crate::{
-    AdministrativeState, AttachBandwidthPolicy, BandwidthLimit, BandwidthLimits, BandwidthPolicy,
-    Change, DetachBandwidthPolicy, DeviceError, Driver, EnsureBandwidthPolicy, EnsureStaticRoute,
-    ErrorKind, Execute, GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, InterfaceName,
-    InterfacePolicies, PolicyAttachment, PolicyName, PolicyScope, RemoveBandwidthPolicy,
-    RemoveInterfaceBandwidthLimit, RemoveStaticRoute, SetInterfaceBandwidthLimit,
-    SetInterfaceDescription, SetInterfaceState, StaticRoute,
+    AccessEntry, AccessList, AccessListName, AdministrativeState, AttachBandwidthPolicy,
+    BandwidthLimit, BandwidthLimits, BandwidthPolicy, Change, DetachBandwidthPolicy, DeviceError,
+    Driver, EnsureAccessList, EnsureBandwidthPolicy, EnsureStaticRoute, ErrorKind, Execute,
+    GetAccessList, GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, InterfaceName,
+    InterfacePolicies, PolicyAttachment, PolicyName, PolicyScope, RemoveAccessList,
+    RemoveBandwidthPolicy, RemoveInterfaceBandwidthLimit, RemoveStaticRoute,
+    SetInterfaceBandwidthLimit, SetInterfaceDescription, SetInterfaceState, StaticRoute,
 };
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -39,6 +40,15 @@ pub enum PolicyState {
     /// The policy must exist exactly like this.
     Present(BandwidthPolicy),
     /// The policy must be absent.
+    Absent,
+}
+
+/// An access list that must exist with these entries, or must be absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AccessListState {
+    /// The list must exist exactly like this.
+    Present(AccessList),
+    /// The list must be absent.
     Absent,
 }
 
@@ -71,6 +81,8 @@ pub struct DesiredState {
     pub device: String,
     /// Bandwidth policies defined on (or removed from) the device.
     pub policies: BTreeMap<PolicyName, PolicyState>,
+    /// Access lists defined on (or removed from) the device.
+    pub access_lists: BTreeMap<AccessListName, AccessListState>,
     /// Interfaces the program configures.
     pub interfaces: BTreeMap<InterfaceName, InterfaceState>,
     /// Static routes that must exist or be absent.
@@ -106,6 +118,28 @@ impl DesiredState {
                                 ("egress", limit_json(policy.limits.egress())),
                             ]),
                             PolicyState::Absent => Json::Object(vec![
+                                ("name", Json::from(name.as_str())),
+                                ("ensure", Json::from("absent")),
+                            ]),
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "access_lists",
+                Json::Array(
+                    self.access_lists
+                        .iter()
+                        .map(|(name, state)| match state {
+                            AccessListState::Present(list) => Json::Object(vec![
+                                ("name", Json::from(name.as_str())),
+                                ("ensure", Json::from("present")),
+                                (
+                                    "entries",
+                                    Json::Array(list.entries().iter().map(entry_json).collect()),
+                                ),
+                            ]),
+                            AccessListState::Absent => Json::Object(vec![
                                 ("name", Json::from(name.as_str())),
                                 ("ensure", Json::from("absent")),
                             ]),
@@ -171,6 +205,16 @@ fn limit_json(limit: Option<BandwidthLimit>) -> Json {
     }
 }
 
+fn entry_json(entry: &AccessEntry) -> Json {
+    let prefix = |prefix: Option<crate::IpPrefix>| {
+        prefix.map_or(Json::Null, |prefix| Json::String(prefix.to_string()))
+    };
+    Json::Object(vec![
+        ("source", prefix(entry.source())),
+        ("destination", prefix(entry.destination())),
+    ])
+}
+
 fn interface_json(name: &InterfaceName, interface: &InterfaceState) -> Json {
     Json::Object(vec![
         ("name", Json::from(name.as_str())),
@@ -200,10 +244,10 @@ fn interface_json(name: &InterfaceName, interface: &InterfaceState) -> Json {
                         Json::Object(vec![
                             ("policy", Json::from(name.as_str())),
                             (
-                                "host",
+                                "access_list",
                                 match scope {
                                     PolicyScope::Interface => Json::Null,
-                                    PolicyScope::Host(host) => Json::String(host.to_string()),
+                                    PolicyScope::AccessList(list) => Json::from(list.as_str()),
                                 },
                             ),
                             ("ensure", presence_json(*presence)),
@@ -375,6 +419,16 @@ recorded!(DetachBandwidthPolicy, |state, op| put(
     (op.name, op.scope),
     Presence::Absent
 ));
+recorded!(EnsureAccessList, |state, op| put(
+    &mut state.access_lists,
+    op.list.name().clone(),
+    AccessListState::Present(op.list)
+));
+recorded!(RemoveAccessList, |state, op| put(
+    &mut state.access_lists,
+    op.name,
+    AccessListState::Absent
+));
 recorded!(SetInterfaceBandwidthLimit, |state, op| set(
     &mut state.interface(&op.interface).bandwidth_limit,
     Some(LimitState::Present(op.limits))
@@ -421,6 +475,23 @@ impl Execute<GetBandwidthPolicy> for DesiredStateRecorder {
     }
 }
 
+impl Execute<GetAccessList> for DesiredStateRecorder {
+    type Output = Option<AccessList>;
+
+    #[allow(clippy::manual_async_fn)]
+    fn execute<'a>(
+        &'a self,
+        operation: GetAccessList,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+        async move {
+            Ok(match self.lock().access_lists.get(&operation.name) {
+                Some(AccessListState::Present(list)) => Some(list.clone()),
+                _ => None,
+            })
+        }
+    }
+}
+
 impl Execute<GetInterfacePolicies> for DesiredStateRecorder {
     type Output = InterfacePolicies;
 
@@ -441,7 +512,7 @@ impl Execute<GetInterfacePolicies> for DesiredStateRecorder {
                     .filter(|(_, presence)| **presence == Presence::Present)
                     .map(|((name, scope), _)| PolicyAttachment {
                         name: name.clone(),
-                        scope: *scope,
+                        scope: scope.clone(),
                     })
                     .collect(),
                 bandwidth_limit: match interface.bandwidth_limit {
@@ -535,6 +606,21 @@ mod tests {
     use super::*;
     use crate::{BitsPerSecond, BurstBytes, DeviceOperation, DeviceOutput, run};
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn list_name() -> AccessListName {
+        AccessListName::new("list-1").unwrap()
+    }
+
+    fn list() -> AccessList {
+        AccessList::new(
+            list_name(),
+            vec![
+                AccessEntry::from_source("192.0.2.20/32".parse().unwrap()),
+                AccessEntry::to_destination("192.0.2.20/32".parse().unwrap()),
+            ],
+        )
+        .unwrap()
+    }
     use std::num::NonZeroU64;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
@@ -560,8 +646,8 @@ mod tests {
         InterfaceName::new("Ethernet1/1").unwrap()
     }
 
-    fn host() -> PolicyScope {
-        PolicyScope::Host(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)))
+    fn list_scope() -> PolicyScope {
+        PolicyScope::AccessList(list_name())
     }
 
     fn limits() -> BandwidthLimits {
@@ -582,6 +668,7 @@ mod tests {
     fn program() -> Vec<DeviceOperation> {
         vec![
             DeviceOperation::EnsureBandwidthPolicy(EnsureBandwidthPolicy::new(throttle())),
+            DeviceOperation::EnsureAccessList(EnsureAccessList::new(list())),
             DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
                 name("throttle"),
                 port(),
@@ -590,12 +677,12 @@ mod tests {
             DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
                 name("throttle"),
                 port(),
-                host(),
+                list_scope(),
             )),
             DeviceOperation::RemoveBandwidthPolicy(RemoveBandwidthPolicy::new(name("old"))),
             DeviceOperation::SetInterfaceDescription(SetInterfaceDescription::new(
                 port(),
-                "customer \"A\"\tport",
+                "uplink \"A\"\tport",
             )),
             DeviceOperation::RemoveStaticRoute(RemoveStaticRoute::new(
                 StaticRoute::new(
@@ -625,10 +712,14 @@ mod tests {
             Presence::Present
         );
         assert_eq!(
-            interface.attachments[&(name("throttle"), host())],
+            interface.attachments[&(name("throttle"), list_scope())],
             Presence::Present
         );
         assert_eq!(state.static_routes.values().next(), Some(&Presence::Absent));
+        assert_eq!(
+            state.access_lists[&list_name()],
+            AccessListState::Present(list())
+        );
     }
 
     #[test]
@@ -644,7 +735,7 @@ mod tests {
                 DeviceOperation::DetachBandwidthPolicy(DetachBandwidthPolicy::new(
                     name("throttle"),
                     port(),
-                    host(),
+                    list_scope(),
                 )),
                 DeviceOperation::SetInterfaceBandwidthLimit(SetInterfaceBandwidthLimit::new(
                     port(),
@@ -658,7 +749,7 @@ mod tests {
         .unwrap();
         let interface = &recorder.state().interfaces[&port()];
         assert_eq!(
-            interface.attachments[&(name("throttle"), host())],
+            interface.attachments[&(name("throttle"), list_scope())],
             Presence::Absent
         );
         assert_eq!(
@@ -734,20 +825,36 @@ mod tests {
       }
     }
   ],
+  "access_lists": [
+    {
+      "name": "list-1",
+      "ensure": "present",
+      "entries": [
+        {
+          "source": "192.0.2.20/32",
+          "destination": null
+        },
+        {
+          "source": null,
+          "destination": "192.0.2.20/32"
+        }
+      ]
+    }
+  ],
   "interfaces": [
     {
       "name": "Ethernet1/1",
       "administrative_state": null,
-      "description": "customer \"A\"\tport",
+      "description": "uplink \"A\"\tport",
       "attachments": [
         {
           "policy": "throttle",
-          "host": null,
+          "access_list": null,
           "ensure": "present"
         },
         {
           "policy": "throttle",
-          "host": "192.0.2.20",
+          "access_list": "list-1",
           "ensure": "present"
         }
       ],

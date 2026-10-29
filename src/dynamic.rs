@@ -1,17 +1,18 @@
 //! Run-time dispatch over the neutral operation set.
 //!
 //! The typed eDSL fixes the driver at compile time. A caller that chooses the
-//! driver at run time (for example per device, from inventory) holds a
+//! driver at run time (for example per device, from its own records) holds a
 //! `Box<dyn DynDriver>` instead and runs a [`DeviceOperation`] list with
 //! [`run`]. Every driver that implements [`Execute`] for the whole neutral set
 //! is a [`DynDriver`] through a blanket implementation.
 
 use crate::{
-    AdministrativeState, AttachBandwidthPolicy, BandwidthPolicy, Change, DetachBandwidthPolicy,
-    DeviceError, Driver, EnsureBandwidthPolicy, EnsureStaticRoute, ErrorKind, Execute,
-    GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, InterfacePolicies,
-    RemoveBandwidthPolicy, RemoveInterfaceBandwidthLimit, RemoveStaticRoute,
-    SetInterfaceBandwidthLimit, SetInterfaceDescription, SetInterfaceState,
+    AccessList, AdministrativeState, AttachBandwidthPolicy, BandwidthPolicy, Change,
+    DetachBandwidthPolicy, DeviceError, Driver, EnsureAccessList, EnsureBandwidthPolicy,
+    EnsureStaticRoute, ErrorKind, Execute, GetAccessList, GetBandwidthPolicy, GetInterfacePolicies,
+    GetInterfaceState, InterfacePolicies, RemoveAccessList, RemoveBandwidthPolicy,
+    RemoveInterfaceBandwidthLimit, RemoveStaticRoute, SetInterfaceBandwidthLimit,
+    SetInterfaceDescription, SetInterfaceState,
 };
 use std::error::Error;
 use std::fmt;
@@ -41,12 +42,18 @@ pub enum DeviceOperation {
     SetInterfaceBandwidthLimit(SetInterfaceBandwidthLimit),
     /// See [`RemoveInterfaceBandwidthLimit`].
     RemoveInterfaceBandwidthLimit(RemoveInterfaceBandwidthLimit),
+    /// See [`EnsureAccessList`].
+    EnsureAccessList(EnsureAccessList),
+    /// See [`RemoveAccessList`].
+    RemoveAccessList(RemoveAccessList),
     /// See [`GetInterfaceState`].
     GetInterfaceState(GetInterfaceState),
     /// See [`GetBandwidthPolicy`].
     GetBandwidthPolicy(GetBandwidthPolicy),
     /// See [`GetInterfacePolicies`].
     GetInterfacePolicies(GetInterfacePolicies),
+    /// See [`GetAccessList`].
+    GetAccessList(GetAccessList),
 }
 
 impl DeviceOperation {
@@ -63,9 +70,12 @@ impl DeviceOperation {
             Self::DetachBandwidthPolicy(_) => "detach_bandwidth_policy",
             Self::SetInterfaceBandwidthLimit(_) => "set_interface_bandwidth_limit",
             Self::RemoveInterfaceBandwidthLimit(_) => "remove_interface_bandwidth_limit",
+            Self::EnsureAccessList(_) => "ensure_access_list",
+            Self::RemoveAccessList(_) => "remove_access_list",
             Self::GetInterfaceState(_) => "get_interface_state",
             Self::GetBandwidthPolicy(_) => "get_bandwidth_policy",
             Self::GetInterfacePolicies(_) => "get_interface_policies",
+            Self::GetAccessList(_) => "get_access_list",
         }
     }
 
@@ -76,6 +86,7 @@ impl DeviceOperation {
             Self::GetInterfaceState(_)
                 | Self::GetBandwidthPolicy(_)
                 | Self::GetInterfacePolicies(_)
+                | Self::GetAccessList(_)
         )
     }
 }
@@ -91,6 +102,8 @@ pub enum DeviceOutput {
     BandwidthPolicy(Option<BandwidthPolicy>),
     /// Result of [`GetInterfacePolicies`].
     InterfacePolicies(InterfacePolicies),
+    /// Result of [`GetAccessList`]; `None` when the list is absent.
+    AccessList(Option<AccessList>),
 }
 
 impl DeviceOutput {
@@ -133,6 +146,9 @@ pub trait NeutralDriver:
     + Execute<GetInterfaceState, Output = AdministrativeState>
     + Execute<GetBandwidthPolicy, Output = Option<BandwidthPolicy>>
     + Execute<GetInterfacePolicies, Output = InterfacePolicies>
+    + Execute<EnsureAccessList, Output = Change>
+    + Execute<RemoveAccessList, Output = Change>
+    + Execute<GetAccessList, Output = Option<AccessList>>
 {
 }
 
@@ -151,6 +167,9 @@ impl<T> NeutralDriver for T where
         + Execute<GetInterfaceState, Output = AdministrativeState>
         + Execute<GetBandwidthPolicy, Output = Option<BandwidthPolicy>>
         + Execute<GetInterfacePolicies, Output = InterfacePolicies>
+        + Execute<EnsureAccessList, Output = Change>
+        + Execute<RemoveAccessList, Output = Change>
+        + Execute<GetAccessList, Output = Option<AccessList>>
 {
 }
 
@@ -238,6 +257,24 @@ impl<T: NeutralDriver> DynDriver for T {
                     Execute::<GetInterfacePolicies>::execute(self, operation)
                         .await
                         .map(DeviceOutput::InterfacePolicies)
+                        .map_err(boxed)
+                }
+                DeviceOperation::EnsureAccessList(operation) => {
+                    Execute::<EnsureAccessList>::execute(self, operation)
+                        .await
+                        .map(DeviceOutput::Change)
+                        .map_err(boxed)
+                }
+                DeviceOperation::RemoveAccessList(operation) => {
+                    Execute::<RemoveAccessList>::execute(self, operation)
+                        .await
+                        .map(DeviceOutput::Change)
+                        .map_err(boxed)
+                }
+                DeviceOperation::GetAccessList(operation) => {
+                    Execute::<GetAccessList>::execute(self, operation)
+                        .await
+                        .map(DeviceOutput::AccessList)
                         .map_err(boxed)
                 }
             }

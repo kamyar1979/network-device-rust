@@ -53,7 +53,7 @@
 //!
 //! A driver implementing the whole neutral operation set ([`NeutralDriver`])
 //! is also a [`DynDriver`], so a caller can choose the driver at run time, for
-//! example per device from inventory, and run a [`DeviceOperation`] list:
+//! example per device from its own records, and run a [`DeviceOperation`] list:
 //!
 //! ```
 //! # use network_device::{DeviceOperation, DynDriver, ErrorKind, run};
@@ -146,6 +146,7 @@
 //! [`DriverConnector::connect`]. This crate has no dependency on a credential
 //! store.
 
+mod acl;
 mod connector;
 mod desired;
 mod dynamic;
@@ -156,10 +157,14 @@ mod operation;
 mod qos;
 mod routing;
 
+pub use acl::{
+    AccessEntry, AccessEntryError, AccessList, AccessListError, AccessListName,
+    AccessListNameError, MAX_ACCESS_LIST_NAME_LENGTH,
+};
 pub use connector::DriverConnector;
 pub use desired::{
-    DESIRED_STATE_SCHEMA, DesiredState, DesiredStateRecorder, InterfaceState, LimitState,
-    NotDescribed, PolicyState, Presence,
+    AccessListState, DESIRED_STATE_SCHEMA, DesiredState, DesiredStateRecorder, InterfaceState,
+    LimitState, NotDescribed, PolicyState, Presence,
 };
 pub use dynamic::{
     DeviceOperation, DeviceOutput, DynDriver, DynFuture, NeutralDriver, ProgramError, run,
@@ -170,11 +175,11 @@ pub use interface::{
     InterfaceName, InterfaceNameError, IpPrefix, IpPrefixError, IpPrefixParseError,
 };
 pub use operation::{
-    AdministrativeState, AttachBandwidthPolicy, DetachBandwidthPolicy, Driver,
-    EnsureBandwidthPolicy, EnsureStaticRoute, Execute, GetBandwidthPolicy, GetInterfacePolicies,
-    GetInterfaceState, OperationStep, RemoveBandwidthPolicy, RemoveInterfaceBandwidthLimit,
-    RemoveStaticRoute, Run, Sequence, SetInterfaceBandwidthLimit, SetInterfaceDescription,
-    SetInterfaceState, operation,
+    AdministrativeState, AttachBandwidthPolicy, DetachBandwidthPolicy, Driver, EnsureAccessList,
+    EnsureBandwidthPolicy, EnsureStaticRoute, Execute, GetAccessList, GetBandwidthPolicy,
+    GetInterfacePolicies, GetInterfaceState, OperationStep, RemoveAccessList,
+    RemoveBandwidthPolicy, RemoveInterfaceBandwidthLimit, RemoveStaticRoute, Run, Sequence,
+    SetInterfaceBandwidthLimit, SetInterfaceDescription, SetInterfaceState, operation,
 };
 pub use qos::{
     BandwidthLimit, BandwidthLimits, BandwidthLimitsError, BandwidthPolicy, BitsPerSecond,
@@ -398,6 +403,21 @@ mod tests {
     neutral_write!(AttachBandwidthPolicy, "attach_bandwidth_policy");
     neutral_write!(DetachBandwidthPolicy, "detach_bandwidth_policy");
     neutral_write!(SetInterfaceBandwidthLimit, "set_interface_bandwidth_limit");
+    neutral_write!(EnsureAccessList, "ensure_access_list");
+    neutral_write!(RemoveAccessList, "remove_access_list");
+
+    impl Execute<GetAccessList> for NeutralTestDriver {
+        type Output = Option<AccessList>;
+
+        #[allow(clippy::manual_async_fn)]
+        fn execute<'a>(
+            &'a self,
+            _operation: GetAccessList,
+        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+            async move { self.record("get_access_list").map(|()| None) }
+        }
+    }
+
     neutral_write!(
         RemoveInterfaceBandwidthLimit,
         "remove_interface_bandwidth_limit"
@@ -482,7 +502,7 @@ mod tests {
             DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
                 PolicyName::new("throttle").unwrap(),
                 port(),
-                PolicyScope::Host(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))),
+                PolicyScope::AccessList(AccessListName::new("list-1").unwrap()),
             )),
         ]
     }

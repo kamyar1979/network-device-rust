@@ -26,22 +26,28 @@ persistence, IaC tool dependencies, or async runtime.
 | `SetInterfaceState`, `SetInterfaceDescription` | Interface administrative state, description | `Change` |
 | `EnsureStaticRoute`, `RemoveStaticRoute` | The route exists / is absent | `Change` |
 | `EnsureBandwidthPolicy`, `RemoveBandwidthPolicy` | The policy exists on the device with exactly these limits / is absent | `Change` |
-| `AttachBandwidthPolicy`, `DetachBandwidthPolicy` | The predefined policy applies / no longer applies to an interface, scoped to all its traffic or to one host address | `Change` |
+| `AttachBandwidthPolicy`, `DetachBandwidthPolicy` | The predefined policy applies / no longer applies to an interface, scoped to all its traffic or to the traffic matching a named access list | `Change` |
+| `EnsureAccessList`, `RemoveAccessList` | The named access list exists with exactly these entries / is absent | `Change` |
 | `SetInterfaceBandwidthLimit`, `RemoveInterfaceBandwidthLimit` | The interface is rate-limited directly / no longer limited, for devices without policy support | `Change` |
 | `GetInterfaceState` | Read | `AdministrativeState` |
 | `GetBandwidthPolicy` | Read | `Option<BandwidthPolicy>` |
 | `GetInterfacePolicies` | Read: attached policies with their scopes, and the direct rate limit | `InterfacePolicies` |
+| `GetAccessList` | Read | `Option<AccessList>` |
 
 A `BandwidthPolicy` is a validated `PolicyName` with `BandwidthLimits`: an
 ingress and/or egress `BandwidthLimit` (rate in bits per second, optional
 burst in bytes). `Change` is `Unchanged` or `Changed { writes }`.
 
-Policies are defined once on a device and then only attached: attaching to a
-host never creates a policy of its own, so a driver adds at most what the scope
-needs (for example a classifier entry). Which enforcement a device gets
-(attaching a predefined policy, or a direct rate limit on a device without
-policy support) and which scope is the caller's decision, made from what it
-knows about the device; a driver implements the operations its devices support
+An `AccessList` is a caller-named list of permit entries, each matching IP
+traffic by source and/or destination prefix.
+
+Policies are defined once on a device and then only attached. Attaching never
+creates a policy of its own; a driver adds at most what the scope needs (for
+an access-list scope, for example, a classifier referencing the list). Which
+enforcement a device gets (attaching a predefined policy, or a direct rate
+limit on a device without policy support), which scope, and how access lists
+are named are the caller's decisions, made from what it knows about the
+device; a driver implements the operations its devices support
 and answers the others with `ErrorKind::Unsupported`.
 
 Every driver error implements `DeviceError` and is classified by `ErrorKind`:
@@ -54,7 +60,7 @@ outcomes from the kind, never from vendor error types.
 
 A driver implementing `Execute` for the whole neutral set (`NeutralDriver`) is
 automatically a `DynDriver`, an object-safe trait. A caller that chooses the
-driver at run time, for example per device from inventory, holds a
+driver at run time, for example per device from its own records, holds a
 `Box<dyn DynDriver>` and runs a list of `DeviceOperation`s:
 
 ```rust,ignore
@@ -142,10 +148,9 @@ connector defines its own target, authentication, driver, and connection error
 types, and consumes the authentication value while constructing an
 authenticated driver. It does not retrieve credentials.
 
-An external integration can use its existing `CredentialProvider` (for
-example, `oss-providers::CredentialProvider`) to resolve a
-`CredentialMaterial`, convert that material to the selected connector's
-`Authentication` type, and then call `connect`:
+An integration resolves credentials from its own credential store, converts
+them to the selected connector's `Authentication` type, and then calls
+`connect`:
 
 ```rust,ignore
 let credential = credential_provider.credential(query).await?;
@@ -157,8 +162,8 @@ operation(provider_operation).run(&driver).await?;
 
 This keeps secret retrieval, leases, and renewal in the external credential
 integration while keeping protocol-specific authentication in the provider.
-`network-device` itself has no dependency on `oss-providers`, Vault, or any
-credential backend. The associated types and returned driver use static
+`network-device` itself has no dependency on Vault or any other credential
+backend. The associated types and returned driver use static
 dispatch; the connector contract adds no `Box`, trait object, or shared-state
 wrapper.
 
