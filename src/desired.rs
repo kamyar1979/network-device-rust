@@ -9,17 +9,16 @@
 //! or turned into a file by this recorder.
 
 use crate::{
-    AdministrativeState, AttachBandwidthPolicy, BandwidthLimit, BandwidthPolicy, Change,
-    DetachBandwidthPolicy, DeviceError, Driver, EnsureBandwidthPolicy, EnsureHostBandwidthLimit,
-    EnsureStaticRoute, ErrorKind, Execute, GetBandwidthPolicy, GetInterfacePolicies,
-    GetInterfaceState, HostBandwidthLimit, InterfaceName, InterfacePolicies, PolicyName,
-    RemoveBandwidthPolicy, RemoveHostBandwidthLimit, RemoveStaticRoute, SetInterfaceDescription,
-    SetInterfaceState, StaticRoute,
+    AdministrativeState, AttachBandwidthPolicy, BandwidthLimit, BandwidthLimits, BandwidthPolicy,
+    Change, DetachBandwidthPolicy, DeviceError, Driver, EnsureBandwidthPolicy, EnsureStaticRoute,
+    ErrorKind, Execute, GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, InterfaceName,
+    InterfacePolicies, PolicyAttachment, PolicyName, PolicyScope, RemoveBandwidthPolicy,
+    RemoveInterfaceBandwidthLimit, RemoveStaticRoute, SetInterfaceBandwidthLimit,
+    SetInterfaceDescription, SetInterfaceState, StaticRoute,
 };
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::future::Future;
-use std::net::IpAddr;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Schema identifier written into every rendered document.
@@ -43,13 +42,13 @@ pub enum PolicyState {
     Absent,
 }
 
-/// A host limit that must exist with this policy, or must be absent.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HostLimitState {
-    /// The host's traffic must be limited by this policy.
-    Present(BandwidthPolicy),
-    /// No limit may remain for the host; the name is the policy it had.
-    Absent(PolicyName),
+/// A direct interface rate limit that must exist with these limits, or must be absent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LimitState {
+    /// The interface must be rate-limited like this.
+    Present(BandwidthLimits),
+    /// No direct rate limit may remain.
+    Absent,
 }
 
 /// The desired state of one interface.
@@ -59,10 +58,10 @@ pub struct InterfaceState {
     pub administrative_state: Option<AdministrativeState>,
     /// Description, when the program sets one.
     pub description: Option<String>,
-    /// Policies attached to (or detached from) all traffic of the interface.
-    pub policies: BTreeMap<PolicyName, Presence>,
-    /// Host limits, at most one per host address.
-    pub host_limits: BTreeMap<IpAddr, HostLimitState>,
+    /// Predefined policies attached (or detached) per scope.
+    pub attachments: BTreeMap<(PolicyName, PolicyScope), Presence>,
+    /// Direct rate limit, for devices enforcing without policies.
+    pub bandwidth_limit: Option<LimitState>,
 }
 
 /// The desired state of one device.
@@ -103,8 +102,8 @@ impl DesiredState {
                             PolicyState::Present(policy) => Json::Object(vec![
                                 ("name", Json::from(name.as_str())),
                                 ("ensure", Json::from("present")),
-                                ("ingress", limit_json(policy.ingress())),
-                                ("egress", limit_json(policy.egress())),
+                                ("ingress", limit_json(policy.limits.ingress())),
+                                ("egress", limit_json(policy.limits.egress())),
                             ]),
                             PolicyState::Absent => Json::Object(vec![
                                 ("name", Json::from(name.as_str())),
@@ -172,14 +171,6 @@ fn limit_json(limit: Option<BandwidthLimit>) -> Json {
     }
 }
 
-fn policy_json(policy: &BandwidthPolicy) -> Json {
-    Json::Object(vec![
-        ("name", Json::from(policy.name().as_str())),
-        ("ingress", limit_json(policy.ingress())),
-        ("egress", limit_json(policy.egress())),
-    ])
-}
-
 fn interface_json(name: &InterfaceName, interface: &InterfaceState) -> Json {
     Json::Object(vec![
         ("name", Json::from(name.as_str())),
@@ -200,14 +191,21 @@ fn interface_json(name: &InterfaceName, interface: &InterfaceState) -> Json {
                 .map_or(Json::Null, Json::from),
         ),
         (
-            "policies",
+            "attachments",
             Json::Array(
                 interface
-                    .policies
+                    .attachments
                     .iter()
-                    .map(|(name, presence)| {
+                    .map(|((name, scope), presence)| {
                         Json::Object(vec![
-                            ("name", Json::from(name.as_str())),
+                            ("policy", Json::from(name.as_str())),
+                            (
+                                "host",
+                                match scope {
+                                    PolicyScope::Interface => Json::Null,
+                                    PolicyScope::Host(host) => Json::String(host.to_string()),
+                                },
+                            ),
                             ("ensure", presence_json(*presence)),
                         ])
                     })
@@ -215,25 +213,16 @@ fn interface_json(name: &InterfaceName, interface: &InterfaceState) -> Json {
             ),
         ),
         (
-            "host_limits",
-            Json::Array(
-                interface
-                    .host_limits
-                    .iter()
-                    .map(|(host, state)| match state {
-                        HostLimitState::Present(policy) => Json::Object(vec![
-                            ("host", Json::String(host.to_string())),
-                            ("ensure", Json::from("present")),
-                            ("policy", policy_json(policy)),
-                        ]),
-                        HostLimitState::Absent(name) => Json::Object(vec![
-                            ("host", Json::String(host.to_string())),
-                            ("ensure", Json::from("absent")),
-                            ("policy_name", Json::from(name.as_str())),
-                        ]),
-                    })
-                    .collect(),
-            ),
+            "bandwidth_limit",
+            match interface.bandwidth_limit {
+                None => Json::Null,
+                Some(LimitState::Present(limits)) => Json::Object(vec![
+                    ("ensure", Json::from("present")),
+                    ("ingress", limit_json(limits.ingress())),
+                    ("egress", limit_json(limits.egress())),
+                ]),
+                Some(LimitState::Absent) => Json::Object(vec![("ensure", Json::from("absent"))]),
+            },
         ),
     ])
 }
@@ -368,7 +357,7 @@ recorded!(RemoveStaticRoute, |state, op| put(
 ));
 recorded!(EnsureBandwidthPolicy, |state, op| put(
     &mut state.policies,
-    op.policy.name().clone(),
+    op.policy.name.clone(),
     PolicyState::Present(op.policy)
 ));
 recorded!(RemoveBandwidthPolicy, |state, op| put(
@@ -377,24 +366,22 @@ recorded!(RemoveBandwidthPolicy, |state, op| put(
     PolicyState::Absent
 ));
 recorded!(AttachBandwidthPolicy, |state, op| put(
-    &mut state.interface(&op.interface).policies,
-    op.name,
+    &mut state.interface(&op.interface).attachments,
+    (op.name, op.scope),
     Presence::Present
 ));
 recorded!(DetachBandwidthPolicy, |state, op| put(
-    &mut state.interface(&op.interface).policies,
-    op.name,
+    &mut state.interface(&op.interface).attachments,
+    (op.name, op.scope),
     Presence::Absent
 ));
-recorded!(EnsureHostBandwidthLimit, |state, op| put(
-    &mut state.interface(&op.interface).host_limits,
-    op.host,
-    HostLimitState::Present(op.policy)
+recorded!(SetInterfaceBandwidthLimit, |state, op| set(
+    &mut state.interface(&op.interface).bandwidth_limit,
+    Some(LimitState::Present(op.limits))
 ));
-recorded!(RemoveHostBandwidthLimit, |state, op| put(
-    &mut state.interface(&op.interface).host_limits,
-    op.host,
-    HostLimitState::Absent(op.name)
+recorded!(RemoveInterfaceBandwidthLimit, |state, op| set(
+    &mut state.interface(&op.interface).bandwidth_limit,
+    Some(LimitState::Absent)
 ));
 
 impl Execute<GetInterfaceState> for DesiredStateRecorder {
@@ -448,23 +435,19 @@ impl Execute<GetInterfacePolicies> for DesiredStateRecorder {
                 return Ok(InterfacePolicies::default());
             };
             Ok(InterfacePolicies {
-                attached: interface
-                    .policies
+                attachments: interface
+                    .attachments
                     .iter()
                     .filter(|(_, presence)| **presence == Presence::Present)
-                    .map(|(name, _)| name.clone())
-                    .collect(),
-                host_limits: interface
-                    .host_limits
-                    .iter()
-                    .filter_map(|(host, limit)| match limit {
-                        HostLimitState::Present(policy) => Some(HostBandwidthLimit {
-                            host: *host,
-                            policy: policy.clone(),
-                        }),
-                        HostLimitState::Absent(_) => None,
+                    .map(|((name, scope), _)| PolicyAttachment {
+                        name: name.clone(),
+                        scope: *scope,
                     })
                     .collect(),
+                bandwidth_limit: match interface.bandwidth_limit {
+                    Some(LimitState::Present(limits)) => Some(limits),
+                    _ => None,
+                },
             })
         }
     }
@@ -551,7 +534,7 @@ fn write_string(output: &mut String, value: &str) {
 mod tests {
     use super::*;
     use crate::{BitsPerSecond, BurstBytes, DeviceOperation, DeviceOutput, run};
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU64;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
@@ -577,13 +560,12 @@ mod tests {
         InterfaceName::new("Ethernet1/1").unwrap()
     }
 
-    fn host() -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))
+    fn host() -> PolicyScope {
+        PolicyScope::Host(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)))
     }
 
-    fn throttle() -> BandwidthPolicy {
-        BandwidthPolicy::new(
-            name("throttle"),
+    fn limits() -> BandwidthLimits {
+        BandwidthLimits::new(
             Some(BandwidthLimit::new(rate(10_000_000))),
             Some(
                 BandwidthLimit::new(rate(20_000_000))
@@ -593,17 +575,22 @@ mod tests {
         .unwrap()
     }
 
+    fn throttle() -> BandwidthPolicy {
+        BandwidthPolicy::new(name("throttle"), limits())
+    }
+
     fn program() -> Vec<DeviceOperation> {
         vec![
             DeviceOperation::EnsureBandwidthPolicy(EnsureBandwidthPolicy::new(throttle())),
             DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
                 name("throttle"),
                 port(),
+                PolicyScope::Interface,
             )),
-            DeviceOperation::EnsureHostBandwidthLimit(EnsureHostBandwidthLimit::new(
+            DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
+                name("throttle"),
                 port(),
                 host(),
-                throttle(),
             )),
             DeviceOperation::RemoveBandwidthPolicy(RemoveBandwidthPolicy::new(name("old"))),
             DeviceOperation::SetInterfaceDescription(SetInterfaceDescription::new(
@@ -633,10 +620,13 @@ mod tests {
         );
         assert_eq!(state.policies[&name("old")], PolicyState::Absent);
         let interface = &state.interfaces[&port()];
-        assert_eq!(interface.policies[&name("throttle")], Presence::Present);
         assert_eq!(
-            interface.host_limits[&host()],
-            HostLimitState::Present(throttle())
+            interface.attachments[&(name("throttle"), PolicyScope::Interface)],
+            Presence::Present
+        );
+        assert_eq!(
+            interface.attachments[&(name("throttle"), host())],
+            Presence::Present
         );
         assert_eq!(state.static_routes.values().next(), Some(&Presence::Absent));
     }
@@ -654,21 +644,28 @@ mod tests {
                 DeviceOperation::DetachBandwidthPolicy(DetachBandwidthPolicy::new(
                     name("throttle"),
                     port(),
-                )),
-                DeviceOperation::RemoveHostBandwidthLimit(RemoveHostBandwidthLimit::new(
-                    port(),
                     host(),
-                    name("throttle"),
+                )),
+                DeviceOperation::SetInterfaceBandwidthLimit(SetInterfaceBandwidthLimit::new(
+                    port(),
+                    limits(),
+                )),
+                DeviceOperation::RemoveInterfaceBandwidthLimit(RemoveInterfaceBandwidthLimit::new(
+                    port(),
                 )),
             ],
         ))
         .unwrap();
         let interface = &recorder.state().interfaces[&port()];
-        assert_eq!(interface.policies[&name("throttle")], Presence::Absent);
         assert_eq!(
-            interface.host_limits[&host()],
-            HostLimitState::Absent(name("throttle"))
+            interface.attachments[&(name("throttle"), host())],
+            Presence::Absent
         );
+        assert_eq!(
+            interface.attachments[&(name("throttle"), PolicyScope::Interface)],
+            Presence::Present
+        );
+        assert_eq!(interface.bandwidth_limit, Some(LimitState::Absent));
     }
 
     #[test]
@@ -689,8 +686,8 @@ mod tests {
         let DeviceOutput::InterfacePolicies(observed) = &outputs[2] else {
             panic!("expected interface policies");
         };
-        assert_eq!(observed.attached, [name("throttle")]);
-        assert_eq!(observed.host_limits[0].host, host());
+        assert_eq!(observed.attachments.len(), 2);
+        assert!(observed.bandwidth_limit.is_none());
 
         let error = block_on(run(
             &recorder,
@@ -706,6 +703,16 @@ mod tests {
     fn the_rendered_document_is_deterministic_neutral_json() {
         let recorder = DesiredStateRecorder::new("leaf-1");
         block_on(run(&recorder, program())).unwrap();
+        block_on(run(
+            &recorder,
+            vec![DeviceOperation::SetInterfaceBandwidthLimit(
+                SetInterfaceBandwidthLimit::new(
+                    InterfaceName::new("Ethernet1/2").unwrap(),
+                    limits(),
+                ),
+            )],
+        ))
+        .unwrap();
         let expected = r#"{
   "schema": "network-device.desired-state/1",
   "device": "leaf-1",
@@ -732,29 +739,36 @@ mod tests {
       "name": "Ethernet1/1",
       "administrative_state": null,
       "description": "customer \"A\"\tport",
-      "policies": [
+      "attachments": [
         {
-          "name": "throttle",
+          "policy": "throttle",
+          "host": null,
+          "ensure": "present"
+        },
+        {
+          "policy": "throttle",
+          "host": "192.0.2.20",
           "ensure": "present"
         }
       ],
-      "host_limits": [
-        {
-          "host": "192.0.2.20",
-          "ensure": "present",
-          "policy": {
-            "name": "throttle",
-            "ingress": {
-              "rate_bps": 10000000,
-              "burst_bytes": null
-            },
-            "egress": {
-              "rate_bps": 20000000,
-              "burst_bytes": 1500000
-            }
-          }
+      "bandwidth_limit": null
+    },
+    {
+      "name": "Ethernet1/2",
+      "administrative_state": null,
+      "description": null,
+      "attachments": [],
+      "bandwidth_limit": {
+        "ensure": "present",
+        "ingress": {
+          "rate_bps": 10000000,
+          "burst_bytes": null
+        },
+        "egress": {
+          "rate_bps": 20000000,
+          "burst_bytes": 1500000
         }
-      ]
+      }
     }
   ],
   "static_routes": [
@@ -766,7 +780,6 @@ mod tests {
   ]
 }
 "#;
-        let rendered = recorder.into_state().to_json();
-        assert_eq!(rendered, expected);
+        assert_eq!(recorder.into_state().to_json(), expected);
     }
 }

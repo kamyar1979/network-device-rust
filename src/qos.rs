@@ -140,81 +140,95 @@ impl BandwidthLimit {
     }
 }
 
-/// A bandwidth policy: at least one direction is limited.
+/// Limits for ingress and/or egress traffic; at least one direction is limited.
 ///
 /// Ingress is traffic entering the device on the interface (a customer's
 /// upload); egress is traffic leaving it (a customer's download).
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct BandwidthPolicy {
-    name: PolicyName,
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct BandwidthLimits {
     ingress: Option<BandwidthLimit>,
     egress: Option<BandwidthLimit>,
 }
 
-impl BandwidthPolicy {
-    /// Creates a policy, requiring at least one limited direction.
+impl BandwidthLimits {
+    /// Creates the limits, requiring at least one limited direction.
     pub fn new(
-        name: PolicyName,
         ingress: Option<BandwidthLimit>,
         egress: Option<BandwidthLimit>,
-    ) -> Result<Self, BandwidthPolicyError> {
+    ) -> Result<Self, BandwidthLimitsError> {
         if ingress.is_none() && egress.is_none() {
-            return Err(BandwidthPolicyError::Unlimited);
+            return Err(BandwidthLimitsError::Unlimited);
         }
-        Ok(Self {
-            name,
-            ingress,
-            egress,
-        })
-    }
-
-    /// Returns the policy name.
-    pub fn name(&self) -> &PolicyName {
-        &self.name
+        Ok(Self { ingress, egress })
     }
 
     /// Returns the ingress limit, if any.
-    pub const fn ingress(&self) -> Option<BandwidthLimit> {
+    pub const fn ingress(self) -> Option<BandwidthLimit> {
         self.ingress
     }
 
     /// Returns the egress limit, if any.
-    pub const fn egress(&self) -> Option<BandwidthLimit> {
+    pub const fn egress(self) -> Option<BandwidthLimit> {
         self.egress
     }
 }
 
-/// Validation error for [`BandwidthPolicy`].
+/// Validation error for [`BandwidthLimits`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BandwidthPolicyError {
+pub enum BandwidthLimitsError {
     /// Neither direction is limited.
     Unlimited,
 }
 
-impl fmt::Display for BandwidthPolicyError {
+impl fmt::Display for BandwidthLimitsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("bandwidth policy must limit ingress, egress, or both")
+        formatter.write_str("bandwidth limits must limit ingress, egress, or both")
     }
 }
 
-impl std::error::Error for BandwidthPolicyError {}
+impl std::error::Error for BandwidthLimitsError {}
 
-/// The bandwidth limit of one host address on an interface.
+/// A named bandwidth policy, defined once on a device and then attached.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct HostBandwidthLimit {
-    /// Host whose traffic is limited.
-    pub host: IpAddr,
-    /// Limits enforced for that host's traffic.
-    pub policy: BandwidthPolicy,
+pub struct BandwidthPolicy {
+    /// Policy name.
+    pub name: PolicyName,
+    /// Limits the policy enforces.
+    pub limits: BandwidthLimits,
 }
 
-/// Bandwidth policies observed on one interface.
+impl BandwidthPolicy {
+    /// Creates a policy.
+    pub const fn new(name: PolicyName, limits: BandwidthLimits) -> Self {
+        Self { name, limits }
+    }
+}
+
+/// The traffic an attached policy applies to.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PolicyScope {
+    /// All traffic of the interface.
+    Interface,
+    /// Only the traffic of one host address on the interface.
+    Host(IpAddr),
+}
+
+/// A predefined policy attached to an interface with a scope.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PolicyAttachment {
+    /// Attached policy.
+    pub name: PolicyName,
+    /// Traffic it applies to.
+    pub scope: PolicyScope,
+}
+
+/// Bandwidth enforcement observed on one interface.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InterfacePolicies {
-    /// Policies applied to all traffic of the interface.
-    pub attached: Vec<PolicyName>,
-    /// Host limits on the interface, at most one per host address.
-    pub host_limits: Vec<HostBandwidthLimit>,
+    /// Predefined policies attached to the interface.
+    pub attachments: Vec<PolicyAttachment>,
+    /// Direct rate limit, on devices enforcing without policies.
+    pub bandwidth_limit: Option<BandwidthLimits>,
 }
 
 /// What a converging operation did.
@@ -270,16 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_limits_at_least_one_direction() {
-        let name = PolicyName::new("p").unwrap();
+    fn limits_require_at_least_one_direction() {
         assert_eq!(
-            BandwidthPolicy::new(name.clone(), None, None),
-            Err(BandwidthPolicyError::Unlimited)
+            BandwidthLimits::new(None, None),
+            Err(BandwidthLimitsError::Unlimited)
         );
-        let policy =
-            BandwidthPolicy::new(name, None, Some(BandwidthLimit::new(rate(20_000_000)))).unwrap();
-        assert_eq!(policy.egress().unwrap().rate.get(), 20_000_000);
-        assert!(policy.ingress().is_none());
+        let limits =
+            BandwidthLimits::new(None, Some(BandwidthLimit::new(rate(20_000_000)))).unwrap();
+        assert_eq!(limits.egress().unwrap().rate.get(), 20_000_000);
+        assert!(limits.ingress().is_none());
     }
 
     #[test]

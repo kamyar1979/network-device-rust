@@ -1,8 +1,10 @@
 //! Typed imperative operations and their embedded DSL composition.
 
-use crate::{BandwidthPolicy, DeviceError, InterfaceName, PolicyName, StaticRoute};
+use crate::{
+    BandwidthLimits, BandwidthPolicy, DeviceError, InterfaceName, PolicyName, PolicyScope,
+    StaticRoute,
+};
 use std::future::Future;
-use std::net::IpAddr;
 
 /// A device driver capable of executing one or more typed operations.
 pub trait Driver: Send + Sync {
@@ -197,10 +199,11 @@ impl RemoveStaticRoute {
 }
 
 /// Converging operation: the policy exists on the device with exactly these
-/// limits, created or updated as needed.
+/// limits, created or updated as needed; running it again changes nothing. Only devices that support
+/// policies implement it; the caller decides from the device's capabilities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsureBandwidthPolicy {
-    /// Desired policy.
+    /// Policy to define.
     pub policy: BandwidthPolicy,
 }
 
@@ -211,7 +214,8 @@ impl EnsureBandwidthPolicy {
     }
 }
 
-/// Converging operation: the policy is absent. Removing a missing policy succeeds.
+/// Converging operation: the policy is not defined on the device. Removing a
+/// missing policy succeeds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoveBandwidthPolicy {
     /// Policy to remove.
@@ -225,81 +229,82 @@ impl RemoveBandwidthPolicy {
     }
 }
 
-/// Converging operation: the policy applies to all traffic of the interface.
+/// Converging operation: the predefined policy applies to the interface's
+/// traffic in the given scope. The policy must already be defined; a driver
+/// adds only what the scope needs (for a host, its classifier entry), never a
+/// policy object of its own.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttachBandwidthPolicy {
-    /// Policy to attach; it must exist on the device.
+    /// Predefined policy to attach.
     pub name: PolicyName,
     /// Interface the policy applies to.
     pub interface: InterfaceName,
+    /// Traffic it applies to.
+    pub scope: PolicyScope,
 }
 
 impl AttachBandwidthPolicy {
-    /// Creates the operation for one policy and interface.
-    pub const fn new(name: PolicyName, interface: InterfaceName) -> Self {
-        Self { name, interface }
+    /// Creates the operation for one policy, interface and scope.
+    pub const fn new(name: PolicyName, interface: InterfaceName, scope: PolicyScope) -> Self {
+        Self {
+            name,
+            interface,
+            scope,
+        }
     }
 }
 
-/// Converging operation: the policy no longer applies to the interface.
+/// Converging operation: the policy no longer applies to the interface's
+/// traffic in the given scope. The policy itself stays defined.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetachBandwidthPolicy {
     /// Policy to detach.
     pub name: PolicyName,
     /// Interface to detach it from.
     pub interface: InterfaceName,
+    /// Traffic it no longer applies to.
+    pub scope: PolicyScope,
 }
 
 impl DetachBandwidthPolicy {
-    /// Creates the operation for one policy and interface.
-    pub const fn new(name: PolicyName, interface: InterfaceName) -> Self {
-        Self { name, interface }
-    }
-}
-
-/// Converging operation: the host's traffic on the interface is limited by the
-/// policy. The driver owns whatever classifiers and objects this needs; an
-/// interface holds at most one limit per host address.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EnsureHostBandwidthLimit {
-    /// Interface carrying the host's traffic.
-    pub interface: InterfaceName,
-    /// Host whose traffic is limited.
-    pub host: IpAddr,
-    /// Complete limits for the host.
-    pub policy: BandwidthPolicy,
-}
-
-impl EnsureHostBandwidthLimit {
-    /// Creates the operation for one host on one interface.
-    pub const fn new(interface: InterfaceName, host: IpAddr, policy: BandwidthPolicy) -> Self {
+    /// Creates the operation for one policy, interface and scope.
+    pub const fn new(name: PolicyName, interface: InterfaceName, scope: PolicyScope) -> Self {
         Self {
-            interface,
-            host,
-            policy,
-        }
-    }
-}
-
-/// Converging operation: no limit remains for the host on the interface.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoveHostBandwidthLimit {
-    /// Interface carrying the host's traffic.
-    pub interface: InterfaceName,
-    /// Host whose limit is removed.
-    pub host: IpAddr,
-    /// Name of the limit's policy, as given when it was ensured.
-    pub name: PolicyName,
-}
-
-impl RemoveHostBandwidthLimit {
-    /// Creates the operation for one host on one interface.
-    pub const fn new(interface: InterfaceName, host: IpAddr, name: PolicyName) -> Self {
-        Self {
-            interface,
-            host,
             name,
+            interface,
+            scope,
         }
+    }
+}
+
+/// Converging operation: the interface's traffic is rate-limited directly with
+/// these limits. This is the enforcement for devices without policy support.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetInterfaceBandwidthLimit {
+    /// Interface to limit.
+    pub interface: InterfaceName,
+    /// Limits to enforce.
+    pub limits: BandwidthLimits,
+}
+
+impl SetInterfaceBandwidthLimit {
+    /// Creates the operation for one interface.
+    pub const fn new(interface: InterfaceName, limits: BandwidthLimits) -> Self {
+        Self { interface, limits }
+    }
+}
+
+/// Converging operation: no direct rate limit remains on the interface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveInterfaceBandwidthLimit {
+    /// Interface to release.
+    pub interface: InterfaceName,
+}
+
+impl RemoveInterfaceBandwidthLimit {
+    /// Creates the operation for one interface.
+    pub const fn new(interface: InterfaceName) -> Self {
+        Self { interface }
     }
 }
 
@@ -331,7 +336,7 @@ impl GetBandwidthPolicy {
     }
 }
 
-/// Read: the bandwidth policies and host limits applied on an interface.
+/// Read: the policies attached to an interface and its direct rate limit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetInterfacePolicies {
     /// Interface to read.

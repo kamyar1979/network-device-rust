@@ -8,10 +8,10 @@
 
 use crate::{
     AdministrativeState, AttachBandwidthPolicy, BandwidthPolicy, Change, DetachBandwidthPolicy,
-    DeviceError, Driver, EnsureBandwidthPolicy, EnsureHostBandwidthLimit, EnsureStaticRoute,
-    ErrorKind, Execute, GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState,
-    InterfacePolicies, RemoveBandwidthPolicy, RemoveHostBandwidthLimit, RemoveStaticRoute,
-    SetInterfaceDescription, SetInterfaceState,
+    DeviceError, Driver, EnsureBandwidthPolicy, EnsureStaticRoute, ErrorKind, Execute,
+    GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, InterfacePolicies,
+    RemoveBandwidthPolicy, RemoveInterfaceBandwidthLimit, RemoveStaticRoute,
+    SetInterfaceBandwidthLimit, SetInterfaceDescription, SetInterfaceState,
 };
 use std::error::Error;
 use std::fmt;
@@ -37,10 +37,10 @@ pub enum DeviceOperation {
     AttachBandwidthPolicy(AttachBandwidthPolicy),
     /// See [`DetachBandwidthPolicy`].
     DetachBandwidthPolicy(DetachBandwidthPolicy),
-    /// See [`EnsureHostBandwidthLimit`].
-    EnsureHostBandwidthLimit(EnsureHostBandwidthLimit),
-    /// See [`RemoveHostBandwidthLimit`].
-    RemoveHostBandwidthLimit(RemoveHostBandwidthLimit),
+    /// See [`SetInterfaceBandwidthLimit`].
+    SetInterfaceBandwidthLimit(SetInterfaceBandwidthLimit),
+    /// See [`RemoveInterfaceBandwidthLimit`].
+    RemoveInterfaceBandwidthLimit(RemoveInterfaceBandwidthLimit),
     /// See [`GetInterfaceState`].
     GetInterfaceState(GetInterfaceState),
     /// See [`GetBandwidthPolicy`].
@@ -61,8 +61,8 @@ impl DeviceOperation {
             Self::RemoveBandwidthPolicy(_) => "remove_bandwidth_policy",
             Self::AttachBandwidthPolicy(_) => "attach_bandwidth_policy",
             Self::DetachBandwidthPolicy(_) => "detach_bandwidth_policy",
-            Self::EnsureHostBandwidthLimit(_) => "ensure_host_bandwidth_limit",
-            Self::RemoveHostBandwidthLimit(_) => "remove_host_bandwidth_limit",
+            Self::SetInterfaceBandwidthLimit(_) => "set_interface_bandwidth_limit",
+            Self::RemoveInterfaceBandwidthLimit(_) => "remove_interface_bandwidth_limit",
             Self::GetInterfaceState(_) => "get_interface_state",
             Self::GetBandwidthPolicy(_) => "get_bandwidth_policy",
             Self::GetInterfacePolicies(_) => "get_interface_policies",
@@ -128,8 +128,8 @@ pub trait NeutralDriver:
     + Execute<RemoveBandwidthPolicy, Output = Change>
     + Execute<AttachBandwidthPolicy, Output = Change>
     + Execute<DetachBandwidthPolicy, Output = Change>
-    + Execute<EnsureHostBandwidthLimit, Output = Change>
-    + Execute<RemoveHostBandwidthLimit, Output = Change>
+    + Execute<SetInterfaceBandwidthLimit, Output = Change>
+    + Execute<RemoveInterfaceBandwidthLimit, Output = Change>
     + Execute<GetInterfaceState, Output = AdministrativeState>
     + Execute<GetBandwidthPolicy, Output = Option<BandwidthPolicy>>
     + Execute<GetInterfacePolicies, Output = InterfacePolicies>
@@ -146,8 +146,8 @@ impl<T> NeutralDriver for T where
         + Execute<RemoveBandwidthPolicy, Output = Change>
         + Execute<AttachBandwidthPolicy, Output = Change>
         + Execute<DetachBandwidthPolicy, Output = Change>
-        + Execute<EnsureHostBandwidthLimit, Output = Change>
-        + Execute<RemoveHostBandwidthLimit, Output = Change>
+        + Execute<SetInterfaceBandwidthLimit, Output = Change>
+        + Execute<RemoveInterfaceBandwidthLimit, Output = Change>
         + Execute<GetInterfaceState, Output = AdministrativeState>
         + Execute<GetBandwidthPolicy, Output = Option<BandwidthPolicy>>
         + Execute<GetInterfacePolicies, Output = InterfacePolicies>
@@ -210,14 +210,14 @@ impl<T: NeutralDriver> DynDriver for T {
                         .map(DeviceOutput::Change)
                         .map_err(boxed)
                 }
-                DeviceOperation::EnsureHostBandwidthLimit(operation) => {
-                    Execute::<EnsureHostBandwidthLimit>::execute(self, operation)
+                DeviceOperation::SetInterfaceBandwidthLimit(operation) => {
+                    Execute::<SetInterfaceBandwidthLimit>::execute(self, operation)
                         .await
                         .map(DeviceOutput::Change)
                         .map_err(boxed)
                 }
-                DeviceOperation::RemoveHostBandwidthLimit(operation) => {
-                    Execute::<RemoveHostBandwidthLimit>::execute(self, operation)
+                DeviceOperation::RemoveInterfaceBandwidthLimit(operation) => {
+                    Execute::<RemoveInterfaceBandwidthLimit>::execute(self, operation)
                         .await
                         .map(DeviceOutput::Change)
                         .map_err(boxed)

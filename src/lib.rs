@@ -158,7 +158,7 @@ mod routing;
 
 pub use connector::DriverConnector;
 pub use desired::{
-    DESIRED_STATE_SCHEMA, DesiredState, DesiredStateRecorder, HostLimitState, InterfaceState,
+    DESIRED_STATE_SCHEMA, DesiredState, DesiredStateRecorder, InterfaceState, LimitState,
     NotDescribed, PolicyState, Presence,
 };
 pub use dynamic::{
@@ -171,14 +171,15 @@ pub use interface::{
 };
 pub use operation::{
     AdministrativeState, AttachBandwidthPolicy, DetachBandwidthPolicy, Driver,
-    EnsureBandwidthPolicy, EnsureHostBandwidthLimit, EnsureStaticRoute, Execute,
-    GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, OperationStep,
-    RemoveBandwidthPolicy, RemoveHostBandwidthLimit, RemoveStaticRoute, Run, Sequence,
-    SetInterfaceDescription, SetInterfaceState, operation,
+    EnsureBandwidthPolicy, EnsureStaticRoute, Execute, GetBandwidthPolicy, GetInterfacePolicies,
+    GetInterfaceState, OperationStep, RemoveBandwidthPolicy, RemoveInterfaceBandwidthLimit,
+    RemoveStaticRoute, Run, Sequence, SetInterfaceBandwidthLimit, SetInterfaceDescription,
+    SetInterfaceState, operation,
 };
 pub use qos::{
-    BandwidthLimit, BandwidthPolicy, BandwidthPolicyError, BitsPerSecond, BurstBytes, Change,
-    HostBandwidthLimit, InterfacePolicies, MAX_POLICY_NAME_LENGTH, PolicyName, PolicyNameError,
+    BandwidthLimit, BandwidthLimits, BandwidthLimitsError, BandwidthPolicy, BitsPerSecond,
+    BurstBytes, Change, InterfacePolicies, MAX_POLICY_NAME_LENGTH, PolicyAttachment, PolicyName,
+    PolicyNameError, PolicyScope,
 };
 pub use routing::{StaticRoute, StaticRouteError};
 
@@ -396,8 +397,11 @@ mod tests {
     neutral_write!(RemoveBandwidthPolicy, "remove_bandwidth_policy");
     neutral_write!(AttachBandwidthPolicy, "attach_bandwidth_policy");
     neutral_write!(DetachBandwidthPolicy, "detach_bandwidth_policy");
-    neutral_write!(EnsureHostBandwidthLimit, "ensure_host_bandwidth_limit");
-    neutral_write!(RemoveHostBandwidthLimit, "remove_host_bandwidth_limit");
+    neutral_write!(SetInterfaceBandwidthLimit, "set_interface_bandwidth_limit");
+    neutral_write!(
+        RemoveInterfaceBandwidthLimit,
+        "remove_interface_bandwidth_limit"
+    );
 
     impl Execute<GetInterfaceState> for NeutralTestDriver {
         type Output = AdministrativeState;
@@ -440,8 +444,11 @@ mod tests {
             async move {
                 self.record("get_interface_policies")
                     .map(|()| InterfacePolicies {
-                        attached: vec![PolicyName::new("throttle").unwrap()],
-                        host_limits: vec![],
+                        attachments: vec![PolicyAttachment {
+                            name: PolicyName::new("throttle").unwrap(),
+                            scope: PolicyScope::Interface,
+                        }],
+                        bandwidth_limit: None,
                     })
             }
         }
@@ -450,12 +457,14 @@ mod tests {
     fn policy(name: &str) -> BandwidthPolicy {
         BandwidthPolicy::new(
             PolicyName::new(name).unwrap(),
-            Some(BandwidthLimit::new(BitsPerSecond::new(
-                NonZeroU64::new(10_000_000).unwrap(),
-            ))),
-            None,
+            BandwidthLimits::new(
+                Some(BandwidthLimit::new(BitsPerSecond::new(
+                    NonZeroU64::new(10_000_000).unwrap(),
+                ))),
+                None,
+            )
+            .unwrap(),
         )
-        .unwrap()
     }
 
     fn port() -> InterfaceName {
@@ -468,11 +477,12 @@ mod tests {
             DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
                 PolicyName::new("throttle").unwrap(),
                 port(),
+                PolicyScope::Interface,
             )),
-            DeviceOperation::EnsureHostBandwidthLimit(EnsureHostBandwidthLimit::new(
+            DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
+                PolicyName::new("throttle").unwrap(),
                 port(),
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)),
-                policy("host-throttle"),
+                PolicyScope::Host(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))),
             )),
         ]
     }
@@ -532,7 +542,7 @@ mod tests {
         let DeviceOutput::InterfacePolicies(observed) = &outputs[2] else {
             panic!("expected interface policies");
         };
-        assert_eq!(observed.attached, [PolicyName::new("throttle").unwrap()]);
+        assert_eq!(observed.attachments[0].scope, PolicyScope::Interface);
         assert!(outputs.iter().all(|output| output.writes() == 0));
     }
 
@@ -577,6 +587,6 @@ mod tests {
         assert_eq!(read.name(), "get_interface_state");
         assert!(read.is_read());
         assert!(!program()[0].is_read());
-        assert_eq!(program()[2].name(), "ensure_host_bandwidth_limit");
+        assert_eq!(program()[2].name(), "attach_bandwidth_policy");
     }
 }

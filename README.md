@@ -25,16 +25,24 @@ persistence, IaC tool dependencies, or async runtime.
 | --- | --- | --- |
 | `SetInterfaceState`, `SetInterfaceDescription` | Interface administrative state, description | `Change` |
 | `EnsureStaticRoute`, `RemoveStaticRoute` | The route exists / is absent | `Change` |
-| `EnsureBandwidthPolicy`, `RemoveBandwidthPolicy` | The policy exists with exactly these limits / is absent | `Change` |
-| `AttachBandwidthPolicy`, `DetachBandwidthPolicy` | The policy applies / no longer applies to all traffic of an interface | `Change` |
-| `EnsureHostBandwidthLimit`, `RemoveHostBandwidthLimit` | One host address's traffic on an interface is limited / no longer limited | `Change` |
+| `EnsureBandwidthPolicy`, `RemoveBandwidthPolicy` | The policy exists on the device with exactly these limits / is absent | `Change` |
+| `AttachBandwidthPolicy`, `DetachBandwidthPolicy` | The predefined policy applies / no longer applies to an interface, scoped to all its traffic or to one host address | `Change` |
+| `SetInterfaceBandwidthLimit`, `RemoveInterfaceBandwidthLimit` | The interface is rate-limited directly / no longer limited, for devices without policy support | `Change` |
 | `GetInterfaceState` | Read | `AdministrativeState` |
 | `GetBandwidthPolicy` | Read | `Option<BandwidthPolicy>` |
-| `GetInterfacePolicies` | Read: attached policies and host limits | `InterfacePolicies` |
+| `GetInterfacePolicies` | Read: attached policies with their scopes, and the direct rate limit | `InterfacePolicies` |
 
-A `BandwidthPolicy` has a validated `PolicyName` and an ingress and/or egress
-`BandwidthLimit` (rate in bits per second, optional burst in bytes). `Change`
-is `Unchanged` or `Changed { writes }`.
+A `BandwidthPolicy` is a validated `PolicyName` with `BandwidthLimits`: an
+ingress and/or egress `BandwidthLimit` (rate in bits per second, optional
+burst in bytes). `Change` is `Unchanged` or `Changed { writes }`.
+
+Policies are defined once on a device and then only attached: attaching to a
+host never creates a policy of its own, so a driver adds at most what the scope
+needs (for example a classifier entry). Which enforcement a device gets
+(attaching a predefined policy, or a direct rate limit on a device without
+policy support) and which scope is the caller's decision, made from what it
+knows about the device; a driver implements the operations its devices support
+and answers the others with `ErrorKind::Unsupported`.
 
 Every driver error implements `DeviceError` and is classified by `ErrorKind`:
 `Unsupported`, `Rejected`, `Transient` (safe to retry), `UnknownOutcome` (a
