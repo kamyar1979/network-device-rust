@@ -5,7 +5,7 @@ use std::fmt;
 use std::net::IpAddr;
 
 /// A static route's destination and next-hop address.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StaticRoute {
     /// Destination network.
     destination: IpPrefix,

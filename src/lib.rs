@@ -1,18 +1,23 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-//! A dependency-free, strongly typed eDSL and base contracts for network
-//! device operations and declarative infrastructure resources.
+//! A dependency-free, strongly typed eDSL and base contracts for configuring
+//! network devices of any vendor, imperatively through drivers or
+//! declaratively through infrastructure-as-code (IaC) backends.
 //!
-//! The imperative API runs operations directly through [`Driver`] and
-//! [`Execute`]. The declarative API describes desired resources for an
-//! [`IacBackend`]. These models are intentionally separate.
+//! Operations state **what** must hold on a device; each driver decides
+//! **how** its device realizes it. Mutating operations converge: running one
+//! again when the device already matches succeeds without change, so callers
+//! can retry them. Every driver error is classified by [`ErrorKind`].
 //!
-//! # Direct execution
+//! # Typed execution
+//!
+//! A driver implements [`Driver`] and [`Execute`] for each operation it
+//! supports; callers compose operations with `then` and [`Run`] them.
 //!
 //! ```
 //! use network_device::{
-//!     AdministrativeState, Driver, Execute, InterfaceName, Run,
+//!     AdministrativeState, Change, Driver, Execute, InterfaceName, Run,
 //!     SetInterfaceState, operation,
 //! };
 //! use std::convert::Infallible;
@@ -25,13 +30,13 @@
 //! }
 //!
 //! impl Execute<SetInterfaceState> for Device {
-//!     type Output = ();
+//!     type Output = Change;
 //!
 //!     fn execute<'a>(
 //!         &'a self,
 //!         _operation: SetInterfaceState,
 //!     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
-//!         async { Ok(()) }
+//!         async { Ok(Change::Changed { writes: 1 }) }
 //!     }
 //! }
 //!
@@ -44,7 +49,52 @@
 //! # }
 //! ```
 //!
+//! # Run-time dispatch
+//!
+//! A driver implementing the whole neutral operation set ([`NeutralDriver`])
+//! is also a [`DynDriver`], so a caller can choose the driver at run time, for
+//! example per device from inventory, and run a [`DeviceOperation`] list:
+//!
+//! ```
+//! # use network_device::{DeviceOperation, DynDriver, ErrorKind, run};
+//! # async fn example(driver: Box<dyn DynDriver>, operations: Vec<DeviceOperation>) {
+//! match run(driver.as_ref(), operations).await {
+//!     Ok(outputs) => println!("{} operations applied", outputs.len()),
+//!     Err(error) if error.kind() == ErrorKind::Transient => println!("retry: {error}"),
+//!     Err(error) => println!("failed: {error}"),
+//! }
+//! # }
+//! ```
+//!
+//! # One program, two interpreters
+//!
+//! The mutating operations converge, so they also describe desired state. The
+//! same program a vendor driver applies to a device can be recorded by
+//! [`DesiredStateRecorder`] and rendered as a neutral IaC document:
+//!
+//! ```
+//! use network_device::{
+//!     AdministrativeState, DesiredStateRecorder, InterfaceName, Run, SetInterfaceState,
+//!     operation,
+//! };
+//!
+//! # async fn example() -> Result<(), network_device::NotDescribed> {
+//! let port = InterfaceName::try_from("Ethernet1/1").expect("valid interface name");
+//! let program = operation(SetInterfaceState::new(port, AdministrativeState::Disabled));
+//!
+//! let recorder = DesiredStateRecorder::new("leaf-1");
+//! program.run(&recorder).await?;
+//! let document = recorder.into_state().to_json();
+//! assert!(document.contains("\"administrative_state\": \"disabled\""));
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # IaC backend
+//!
+//! The declarative model describes desired resources for an [`IacBackend`],
+//! which plans and applies them, for example by rendering IaC files. It is
+//! intentionally separate from the imperative operations.
 //!
 //! ```
 //! use network_device::{
@@ -91,36 +141,55 @@
 //!
 //! [`DriverConnector`] constructs and authenticates a concrete provider driver
 //! from a provider-defined target and authentication value. Credential lookup
-//! remains the responsibility of the integrating application. For example, an
-//! integration can resolve an `oss_providers::CredentialMaterial` using its
-//! `CredentialProvider`, convert that value into the selected connector's
-//! `Authentication` type, and pass it to [`DriverConnector::connect`]. This
-//! crate has no dependency on `oss-providers`, Vault, or a credential store.
+//! remains the responsibility of the integrating application, which resolves
+//! credentials from its own store and passes them to
+//! [`DriverConnector::connect`]. This crate has no dependency on a credential
+//! store.
 
 mod connector;
+mod desired;
+mod dynamic;
+mod error;
 mod iac;
 mod interface;
 mod operation;
+mod qos;
 mod routing;
 
 pub use connector::DriverConnector;
+pub use desired::{
+    DESIRED_STATE_SCHEMA, DesiredState, DesiredStateRecorder, HostLimitState, InterfaceState,
+    NotDescribed, PolicyState, Presence,
+};
+pub use dynamic::{
+    DeviceOperation, DeviceOutput, DynDriver, DynFuture, NeutralDriver, ProgramError, run,
+};
+pub use error::{DeviceError, ErrorKind, Unsupported};
 pub use iac::{IacBackend, InterfaceConfiguration, StaticRouteConfiguration};
 pub use interface::{
     InterfaceName, InterfaceNameError, IpPrefix, IpPrefixError, IpPrefixParseError,
 };
 pub use operation::{
-    AdministrativeState, Driver, EnsureStaticRoute, Execute, OperationStep, RemoveStaticRoute, Run,
-    Sequence, SetInterfaceDescription, SetInterfaceState, operation,
+    AdministrativeState, AttachBandwidthPolicy, DetachBandwidthPolicy, Driver,
+    EnsureBandwidthPolicy, EnsureHostBandwidthLimit, EnsureStaticRoute, Execute,
+    GetBandwidthPolicy, GetInterfacePolicies, GetInterfaceState, OperationStep,
+    RemoveBandwidthPolicy, RemoveHostBandwidthLimit, RemoveStaticRoute, Run, Sequence,
+    SetInterfaceDescription, SetInterfaceState, operation,
+};
+pub use qos::{
+    BandwidthLimit, BandwidthPolicy, BandwidthPolicyError, BitsPerSecond, BurstBytes, Change,
+    HostBandwidthLimit, InterfacePolicies, MAX_POLICY_NAME_LENGTH, PolicyName, PolicyNameError,
 };
 pub use routing::{StaticRoute, StaticRouteError};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::Infallible;
     use std::future::Future;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::num::NonZeroU64;
     use std::pin::pin;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::task::{Context, Poll, Waker};
@@ -138,6 +207,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum TestError {
         Failed,
+        Partial { kind: ErrorKind, writes: usize },
     }
 
     impl std::fmt::Display for TestError {
@@ -147,6 +217,22 @@ mod tests {
     }
 
     impl std::error::Error for TestError {}
+
+    impl DeviceError for TestError {
+        fn kind(&self) -> ErrorKind {
+            match self {
+                Self::Failed => ErrorKind::Rejected,
+                Self::Partial { kind, .. } => *kind,
+            }
+        }
+
+        fn completed_writes(&self) -> usize {
+            match self {
+                Self::Failed => 0,
+                Self::Partial { writes, .. } => *writes,
+            }
+        }
+    }
 
     struct TestDriver {
         events: Sender<&'static str>,
@@ -258,10 +344,202 @@ mod tests {
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["extension"]);
     }
 
+    /// Implements the neutral set: each write reports two device writes, reads
+    /// return fixed values, and `fail_on` makes one operation fail.
+    struct NeutralTestDriver {
+        log: Mutex<Vec<&'static str>>,
+        fail_on: Option<(&'static str, TestError)>,
+    }
+
+    impl NeutralTestDriver {
+        fn new(fail_on: Option<(&'static str, TestError)>) -> Self {
+            Self {
+                log: Mutex::new(Vec::new()),
+                fail_on,
+            }
+        }
+
+        fn record(&self, name: &'static str) -> Result<(), TestError> {
+            self.log.lock().unwrap().push(name);
+            match self.fail_on {
+                Some((failing, error)) if failing == name => Err(error),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    impl Driver for NeutralTestDriver {
+        type Error = TestError;
+    }
+
+    macro_rules! neutral_write {
+        ($operation:ty, $name:literal) => {
+            impl Execute<$operation> for NeutralTestDriver {
+                type Output = Change;
+
+                #[allow(clippy::manual_async_fn)]
+                fn execute<'a>(
+                    &'a self,
+                    _operation: $operation,
+                ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+                    async move { self.record($name).map(|()| Change::Changed { writes: 2 }) }
+                }
+            }
+        };
+    }
+
+    neutral_write!(SetInterfaceState, "set_interface_state");
+    neutral_write!(SetInterfaceDescription, "set_interface_description");
+    neutral_write!(EnsureStaticRoute, "ensure_static_route");
+    neutral_write!(RemoveStaticRoute, "remove_static_route");
+    neutral_write!(EnsureBandwidthPolicy, "ensure_bandwidth_policy");
+    neutral_write!(RemoveBandwidthPolicy, "remove_bandwidth_policy");
+    neutral_write!(AttachBandwidthPolicy, "attach_bandwidth_policy");
+    neutral_write!(DetachBandwidthPolicy, "detach_bandwidth_policy");
+    neutral_write!(EnsureHostBandwidthLimit, "ensure_host_bandwidth_limit");
+    neutral_write!(RemoveHostBandwidthLimit, "remove_host_bandwidth_limit");
+
+    impl Execute<GetInterfaceState> for NeutralTestDriver {
+        type Output = AdministrativeState;
+
+        #[allow(clippy::manual_async_fn)]
+        fn execute<'a>(
+            &'a self,
+            _operation: GetInterfaceState,
+        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+            async move {
+                self.record("get_interface_state")
+                    .map(|()| AdministrativeState::Disabled)
+            }
+        }
+    }
+
+    impl Execute<GetBandwidthPolicy> for NeutralTestDriver {
+        type Output = Option<BandwidthPolicy>;
+
+        #[allow(clippy::manual_async_fn)]
+        fn execute<'a>(
+            &'a self,
+            operation: GetBandwidthPolicy,
+        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+            async move {
+                self.record("get_bandwidth_policy")
+                    .map(|()| Some(policy(operation.name.as_str())))
+            }
+        }
+    }
+
+    impl Execute<GetInterfacePolicies> for NeutralTestDriver {
+        type Output = InterfacePolicies;
+
+        #[allow(clippy::manual_async_fn)]
+        fn execute<'a>(
+            &'a self,
+            _operation: GetInterfacePolicies,
+        ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+            async move {
+                self.record("get_interface_policies")
+                    .map(|()| InterfacePolicies {
+                        attached: vec![PolicyName::new("throttle").unwrap()],
+                        host_limits: vec![],
+                    })
+            }
+        }
+    }
+
+    fn policy(name: &str) -> BandwidthPolicy {
+        BandwidthPolicy::new(
+            PolicyName::new(name).unwrap(),
+            Some(BandwidthLimit::new(BitsPerSecond::new(
+                NonZeroU64::new(10_000_000).unwrap(),
+            ))),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn port() -> InterfaceName {
+        InterfaceName::new("Ethernet1/1").unwrap()
+    }
+
+    fn program() -> Vec<DeviceOperation> {
+        vec![
+            DeviceOperation::EnsureBandwidthPolicy(EnsureBandwidthPolicy::new(policy("throttle"))),
+            DeviceOperation::AttachBandwidthPolicy(AttachBandwidthPolicy::new(
+                PolicyName::new("throttle").unwrap(),
+                port(),
+            )),
+            DeviceOperation::EnsureHostBandwidthLimit(EnsureHostBandwidthLimit::new(
+                port(),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)),
+                policy("host-throttle"),
+            )),
+        ]
+    }
+
+    #[test]
+    fn a_neutral_driver_runs_a_runtime_program_through_a_trait_object() {
+        let driver: Box<dyn DynDriver> = Box::new(NeutralTestDriver::new(None));
+        let outputs = block_on(run(driver.as_ref(), program())).unwrap();
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs.iter().map(DeviceOutput::writes).sum::<usize>(), 6);
+    }
+
+    #[test]
+    fn a_program_stops_at_the_first_error_and_reports_its_progress() {
+        let partial = TestError::Partial {
+            kind: ErrorKind::UnknownOutcome,
+            writes: 1,
+        };
+        let driver = NeutralTestDriver::new(Some(("attach_bandwidth_policy", partial)));
+        let error = block_on(run(&driver, program())).unwrap_err();
+
+        assert_eq!(error.completed_operations, 1);
+        assert_eq!(error.completed_writes, 3);
+        assert_eq!(error.operation, "attach_bandwidth_policy");
+        assert_eq!(error.kind(), ErrorKind::UnknownOutcome);
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(
+            *driver.log.lock().unwrap(),
+            ["ensure_bandwidth_policy", "attach_bandwidth_policy"]
+        );
+    }
+
+    #[test]
+    fn reads_return_normalized_values() {
+        let driver = NeutralTestDriver::new(None);
+        let outputs = block_on(run(
+            &driver,
+            vec![
+                DeviceOperation::GetInterfaceState(GetInterfaceState::new(port())),
+                DeviceOperation::GetBandwidthPolicy(GetBandwidthPolicy::new(
+                    PolicyName::new("throttle").unwrap(),
+                )),
+                DeviceOperation::GetInterfacePolicies(GetInterfacePolicies::new(port())),
+            ],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            outputs[0],
+            DeviceOutput::AdministrativeState(AdministrativeState::Disabled)
+        );
+        assert_eq!(
+            outputs[1],
+            DeviceOutput::BandwidthPolicy(Some(policy("throttle")))
+        );
+        let DeviceOutput::InterfacePolicies(observed) = &outputs[2] else {
+            panic!("expected interface policies");
+        };
+        assert_eq!(observed.attached, [PolicyName::new("throttle").unwrap()]);
+        assert!(outputs.iter().all(|output| output.writes() == 0));
+    }
+
     struct TestIacBackend;
 
     impl IacBackend<StaticRouteConfiguration> for TestIacBackend {
-        type Error = Infallible;
+        type Error = std::convert::Infallible;
         type Plan = bool;
         type ApplyResult = usize;
 
@@ -291,5 +569,14 @@ mod tests {
 
         assert!(block_on(backend.plan(&desired)).unwrap());
         assert_eq!(block_on(backend.apply(&desired)).unwrap(), 24);
+    }
+
+    #[test]
+    fn operation_names_and_read_flags_are_stable() {
+        let read = DeviceOperation::GetInterfaceState(GetInterfaceState::new(port()));
+        assert_eq!(read.name(), "get_interface_state");
+        assert!(read.is_read());
+        assert!(!program()[0].is_read());
+        assert_eq!(program()[2].name(), "ensure_host_bandwidth_limit");
     }
 }

@@ -1,16 +1,87 @@
 # network-device
 
-`network-device` is a dependency-free Rust core for two distinct ways to
-express network configuration:
+`network-device` is a dependency-free Rust core for configuring network
+devices of any vendor with one uniform eDSL. A program of vendor-neutral
+operations can be:
 
-- **Operational eDSL:** typed imperative operations executed immediately by
-  a selected device driver.
-- **Desired state:** declarative resource values planned and applied by an
-  infrastructure-as-code (IaC) backend.
+- **applied to a device** by a vendor driver (for example `nxapi` for Cisco
+  NX-API), or
+- **recorded as desired state** by `DesiredStateRecorder` and rendered as a
+  neutral infrastructure-as-code (IaC) document.
 
-The crate contains neutral domain values, standard operation/resource types,
-and open extension contracts. It contains no protocol clients, vendor payload
-or path abstraction, persistence, Terraform/Pulumi dependencies, or runtime.
+Operations state **what** must hold on a device; each driver decides **how**
+its device realizes it. Mutating operations converge (running one again when
+the device already matches changes nothing), which is what makes the same
+program both executable and declarative. Reads return normalized values for
+discovery and for comparing a device with its desired state.
+
+The crate contains neutral domain values, the standard operations, and open
+extension contracts. It contains no protocol clients, vendor payloads,
+persistence, IaC tool dependencies, or async runtime.
+
+## Neutral operations
+
+| Operation | Effect | Output |
+| --- | --- | --- |
+| `SetInterfaceState`, `SetInterfaceDescription` | Interface administrative state, description | `Change` |
+| `EnsureStaticRoute`, `RemoveStaticRoute` | The route exists / is absent | `Change` |
+| `EnsureBandwidthPolicy`, `RemoveBandwidthPolicy` | The policy exists with exactly these limits / is absent | `Change` |
+| `AttachBandwidthPolicy`, `DetachBandwidthPolicy` | The policy applies / no longer applies to all traffic of an interface | `Change` |
+| `EnsureHostBandwidthLimit`, `RemoveHostBandwidthLimit` | One host address's traffic on an interface is limited / no longer limited | `Change` |
+| `GetInterfaceState` | Read | `AdministrativeState` |
+| `GetBandwidthPolicy` | Read | `Option<BandwidthPolicy>` |
+| `GetInterfacePolicies` | Read: attached policies and host limits | `InterfacePolicies` |
+
+A `BandwidthPolicy` has a validated `PolicyName` and an ingress and/or egress
+`BandwidthLimit` (rate in bits per second, optional burst in bytes). `Change`
+is `Unchanged` or `Changed { writes }`.
+
+Every driver error implements `DeviceError` and is classified by `ErrorKind`:
+`Unsupported`, `Rejected`, `Transient` (safe to retry), `UnknownOutcome` (a
+write may have been applied), or `Authentication`, together with the number of
+device writes acknowledged before the failure. Callers decide retries and
+outcomes from the kind, never from vendor error types.
+
+## Run-time dispatch
+
+A driver implementing `Execute` for the whole neutral set (`NeutralDriver`) is
+automatically a `DynDriver`, an object-safe trait. A caller that chooses the
+driver at run time, for example per device from inventory, holds a
+`Box<dyn DynDriver>` and runs a list of `DeviceOperation`s:
+
+```rust,ignore
+match network_device::run(driver.as_ref(), operations).await {
+    Ok(outputs) => { /* every operation applied */ }
+    Err(error) => {
+        // error.completed_operations, error.completed_writes, error.kind()
+    }
+}
+```
+
+`run` executes in order, stops at the first error, and reports how far the
+program got. A driver lacking a capability still implements the operation and
+fails it with `ErrorKind::Unsupported` (see `Unsupported`).
+
+## Desired state and neutral IaC
+
+`DesiredStateRecorder` is a driver for the whole neutral set that changes no
+device: it records what each operation requires into a `DesiredState` for one
+device. Converging writes become entries that are present or explicitly
+absent, so the state says both what must exist and what must be removed.
+Reads answer from the recorded state.
+
+```rust,ignore
+let recorder = DesiredStateRecorder::new("leaf-1");
+network_device::run(&recorder, operations).await?;
+std::fs::write("leaf-1.json", recorder.into_state().to_json())?;
+```
+
+`DesiredState::to_json` renders a neutral document with the schema
+`network-device.desired-state/1`: pretty-printed JSON with fixed key order
+and sorted entries, so the same state always renders the same bytes and
+changes diff cleanly. Tool-specific IaC (Terraform, Ansible, vendor
+templates) is generated from this document or from `DesiredState` by an
+`IacBackend`; this crate depends on none of those tools.
 
 ## Operational eDSL
 
@@ -97,7 +168,12 @@ Each downstream crate can define its own operation and implement
 operation for its own driver. New operation kinds do not require changes to
 this crate.
 
-## Desired State and IaC
+## IaC backends
+
+`IacBackend<Resource>` plans and applies a desired resource with a
+backend-specific plan and result, for example a `DesiredState` rendered into a
+tool's files. The finer-grained resources `InterfaceConfiguration` and
+`StaticRouteConfiguration` remain available.
 
 Desired-state resources are not imperative commands. For example,
 `InterfaceConfiguration` describes a target configuration, while
@@ -164,9 +240,10 @@ types.
 - `IpPrefix` validates IPv4 and IPv6 prefix lengths.
 - `StaticRoute` validates that its destination and next hop use the same IP
   family.
-- Standard operations: `SetInterfaceState`, `SetInterfaceDescription`,
-  `EnsureStaticRoute`, and `RemoveStaticRoute`.
-- Standard desired resources: `InterfaceConfiguration` and
+- `PolicyName` accepts 1 to 63 ASCII letters, digits, hyphens or underscores;
+  `BandwidthPolicy` limits at least one direction.
+- Standard operations: see the table above.
+- Standard desired resources: `DesiredState`, `InterfaceConfiguration`, and
   `StaticRouteConfiguration`.
 
 These are shared semantic types, not a claim that every device protocol maps

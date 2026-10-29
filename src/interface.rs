@@ -73,7 +73,7 @@ impl fmt::Display for InterfaceNameError {
 impl std::error::Error for InterfaceNameError {}
 
 /// A validated IP address and network prefix length.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IpPrefix {
     /// Address portion of the prefix.
     address: IpAddr,
